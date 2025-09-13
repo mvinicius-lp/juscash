@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
@@ -16,6 +16,7 @@ from app.integrations.chroma import (
 )
 from app.integrations.generator import generate_answer
 from app.services.verify import apply_rules, build_rationale, policy_sources
+from app.services.ingest import ingest_text, ingest_pdf_bytes
 
 
 class CreateCollectionIn(BaseModel):
@@ -45,6 +46,13 @@ class VerifyIn(BaseModel):
     transitado_em_julgado: Optional[bool] = None
     fase: Optional[str] = None
     docs: Optional[Dict[str, Any]] = None
+
+
+class IngestTextIn(BaseModel):
+    collection: str
+    text: str
+    chunk_size: int = 800
+    overlap: int = 150
 
 
 def create_app() -> FastAPI:
@@ -89,7 +97,7 @@ def create_app() -> FastAPI:
         texts = [r["text"] for r in POLICY_RULES]
         ids = [r["id"] for r in POLICY_RULES]
         metas = [{"rule_id": r["id"]} for r in POLICY_RULES]
-        upsert_documents("policy", texts, metas, ids)  
+        upsert_documents("policy", texts, metas, ids) 
         col = get_or_create_collection("policy")
         return {
             "collection": "policy",
@@ -100,6 +108,36 @@ def create_app() -> FastAPI:
     @application.post("/policy/query")
     def policy_query(body: QueryIn):
         return query_collection("policy", body.text, body.top_k)
+
+    @application.post("/ingest/text")
+    def ingest_text_endpoint(body: IngestTextIn):
+        res = ingest_text(
+            collection=body.collection,
+            text=body.text,
+            chunk_size=body.chunk_size,
+            overlap=body.overlap,
+        )
+        cnt = collection_count(body.collection)
+        res["count_after"] = cnt
+        return res
+
+    @application.post("/ingest/pdf")
+    async def ingest_pdf_endpoint(
+        collection: str = Form(...),
+        chunk_size: int = Form(800),
+        overlap: int = Form(150),
+        file: UploadFile = File(...),
+    ):
+        file_bytes = await file.read()
+        res = ingest_pdf_bytes(
+            collection=collection,
+            file_bytes=file_bytes,
+            filename=file.filename or "upload.pdf",
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+        res["count_after"] = collection_count(collection)
+        return res
 
     @application.post("/rag/ask")
     def rag_ask(body: RagAskIn):
@@ -126,7 +164,7 @@ def create_app() -> FastAPI:
         rationale = build_rationale(decision, citations)
         return {
             "decision": decision,            
-            "citations": citations,         
+            "citations": citations,          
             "reasons": reasons,              
             "rationale": rationale,          
             "sources": policy_sources(citations),  
